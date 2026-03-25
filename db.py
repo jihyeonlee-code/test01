@@ -46,10 +46,14 @@ def init_db() -> None:
                 category TEXT NOT NULL,
                 region TEXT NOT NULL,
                 amount REAL NOT NULL,
-                quantity INTEGER NOT NULL
+                quantity INTEGER NOT NULL,
+                impressions INTEGER NOT NULL DEFAULT 0,
+                clicks INTEGER NOT NULL DEFAULT 0,
+                ad_spend REAL NOT NULL DEFAULT 0
             );
             """
         )
+        _ensure_sales_ad_columns(conn)
         row = conn.execute(
             "SELECT COUNT(*) AS c FROM users WHERE username = ?",
             ("admin",),
@@ -65,6 +69,43 @@ def init_db() -> None:
         row = conn.execute("SELECT COUNT(*) AS c FROM sales").fetchone()
         if row["c"] == 0:
             _seed_sales(conn)
+        else:
+            _backfill_sales_ad_metrics_if_needed(conn)
+
+
+def _ensure_sales_ad_columns(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
+    if "impressions" not in cols:
+        conn.execute(
+            "ALTER TABLE sales ADD COLUMN impressions INTEGER NOT NULL DEFAULT 0"
+        )
+    if "clicks" not in cols:
+        conn.execute("ALTER TABLE sales ADD COLUMN clicks INTEGER NOT NULL DEFAULT 0")
+    if "ad_spend" not in cols:
+        conn.execute("ALTER TABLE sales ADD COLUMN ad_spend REAL NOT NULL DEFAULT 0")
+
+
+def _backfill_sales_ad_metrics_if_needed(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN impressions > 0 THEN 1 ELSE 0 END) AS nz "
+        "FROM sales"
+    ).fetchone()
+    if row is None or row["total"] == 0:
+        return
+    if row["nz"] and row["nz"] > 0:
+        return
+    for r in conn.execute(
+        "SELECT id, amount FROM sales ORDER BY id"
+    ).fetchall():
+        sid = int(r["id"])
+        amt = float(r["amount"])
+        imp = 5000 + (sid * 131) % 80000
+        clk = max(1, min(imp - 1, imp * ((sid * 7) % 12 + 1) // 100))
+        spend = amt * 0.12 + (sid % 200) * 30.0
+        conn.execute(
+            "UPDATE sales SET impressions = ?, clicks = ?, ad_spend = ? WHERE id = ?",
+            (imp, clk, spend, sid),
+        )
 
 
 def _seed_sales(conn: sqlite3.Connection) -> None:
@@ -78,9 +119,19 @@ def _seed_sales(conn: sqlite3.Connection) -> None:
         reg = regions[i % len(regions)]
         amount = 10000 + (i * 137) % 500000
         qty = 1 + (i * 3) % 48
-        rows.append((d.isoformat(), cat, reg, float(amount), qty))
+        imp = 5000 + (i * 131) % 80000
+        clk = max(1, min(imp - 1, imp * ((i * 7) % 12 + 1) // 100))
+        spend = float(amount) * 0.12 + (i % 200) * 30.0
+        rows.append(
+            (d.isoformat(), cat, reg, float(amount), qty, imp, clk, spend)
+        )
     conn.executemany(
-        "INSERT INTO sales (sale_date, category, region, amount, quantity) VALUES (?,?,?,?,?)",
+        """
+        INSERT INTO sales (
+            sale_date, category, region, amount, quantity,
+            impressions, clicks, ad_spend
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
         rows,
     )
 
@@ -129,7 +180,10 @@ def fetch_sales(
     categories: list[str] | None,
     regions: list[str] | None,
 ) -> list[sqlite3.Row]:
-    q = "SELECT sale_date, category, region, amount, quantity FROM sales WHERE 1=1"
+    q = (
+        "SELECT sale_date, category, region, amount, quantity, "
+        "impressions, clicks, ad_spend FROM sales WHERE 1=1"
+    )
     params: list[Any] = []
     if date_from:
         q += " AND sale_date >= ?"

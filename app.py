@@ -77,31 +77,52 @@ def dashboard() -> None:
     total_qty = df["quantity"].sum()
     orders = len(df)
 
-    st.title("매출 대시보드")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("총 매출액", f"{total_amt:,.0f}원")
-    c2.metric("총 판매 수량", f"{int(total_qty):,}")
-    c3.metric("건수", f"{orders:,}")
+    tab_dash, = st.tabs(["대시보드"])
+    with tab_dash:
+        st.title("매출 대시보드")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("총 매출액", f"{total_amt:,.0f}원")
+        c2.metric("총 판매 수량", f"{int(total_qty):,}")
+        c3.metric("건수", f"{orders:,}")
 
-    daily = df.groupby(df["sale_date"].dt.date, as_index=False).agg(
-        amount=("amount", "sum"),
-        quantity=("quantity", "sum"),
-    )
-    daily = daily.rename(columns={"sale_date": "일자"})
+        total_clk = int(df["clicks"].sum())
+        total_imp = int(df["impressions"].sum())
+        ctr_pct = (total_clk / total_imp * 100.0) if total_imp else 0.0
+        total_spend = float(df["ad_spend"].sum())
+        cpc = (total_spend / total_clk) if total_clk else 0.0
 
-    st.subheader("일별 매출 추이")
-    st.line_chart(daily.set_index("일자")["amount"])
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("총 클릭수", f"{total_clk:,}")
+        k2.metric("총 노출수", f"{total_imp:,}")
+        k3.metric("평균 CTR", f"{ctr_pct:.2f}%")
+        k4.metric("평균 CPC", f"{cpc:,.0f}원")
 
-    st.subheader("카테고리별 매출")
-    by_cat = df.groupby("category", as_index=False)["amount"].sum().sort_values("amount", ascending=False)
-    st.bar_chart(by_cat.set_index("category")["amount"])
+        daily = df.groupby(df["sale_date"].dt.date, as_index=False).agg(
+            amount=("amount", "sum"),
+            quantity=("quantity", "sum"),
+        )
+        daily = daily.rename(columns={"sale_date": "일자"})
 
-    st.subheader("지역별 매출")
-    by_reg = df.groupby("region", as_index=False)["amount"].sum().sort_values("amount", ascending=False)
-    st.bar_chart(by_reg.set_index("region")["amount"])
+        st.subheader("일별 매출 추이")
+        st.line_chart(daily.set_index("일자")["amount"])
 
-    with st.expander("원본 데이터 미리보기"):
-        st.dataframe(df.sort_values("sale_date", ascending=False), use_container_width=True)
+        st.subheader("카테고리별 매출")
+        by_cat = df.groupby("category", as_index=False)["amount"].sum().sort_values(
+            "amount", ascending=False
+        )
+        st.bar_chart(by_cat.set_index("category")["amount"])
+
+        st.subheader("지역별 매출")
+        by_reg = df.groupby("region", as_index=False)["amount"].sum().sort_values(
+            "amount", ascending=False
+        )
+        st.bar_chart(by_reg.set_index("region")["amount"])
+
+        with st.expander("원본 데이터 미리보기"):
+            st.dataframe(
+                df.sort_values("sale_date", ascending=False),
+                use_container_width=True,
+            )
 
 
 def main() -> None:
