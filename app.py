@@ -23,13 +23,18 @@ def ensure_session() -> None:
 
 
 def _ensure_ad_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """빈 DF·컬럼 누락 시에도 KPI/차트에서 KeyError가 나지 않게 맞춤."""
     out = frame.copy()
+    if "ad_spend" not in out.columns:
+        out["ad_spend"] = 0.0
+    if "amount" not in out.columns:
+        out["amount"] = 0.0
+    if "conversions" not in out.columns:
+        out["conversions"] = 0
     if "channel" not in out.columns:
         out["channel"] = "기타"
     else:
         out["channel"] = out["channel"].replace("", "기타").fillna("기타")
-    if "conversions" not in out.columns:
-        out["conversions"] = 0
     out["conversions"] = pd.to_numeric(out["conversions"], errors="coerce").fillna(0)
     out["ad_spend"] = pd.to_numeric(out["ad_spend"], errors="coerce").fillna(0)
     out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(0)
