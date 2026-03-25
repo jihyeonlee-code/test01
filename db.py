@@ -49,11 +49,14 @@ def init_db() -> None:
                 quantity INTEGER NOT NULL,
                 impressions INTEGER NOT NULL DEFAULT 0,
                 clicks INTEGER NOT NULL DEFAULT 0,
-                ad_spend REAL NOT NULL DEFAULT 0
+                ad_spend REAL NOT NULL DEFAULT 0,
+                channel TEXT NOT NULL DEFAULT '',
+                conversions INTEGER NOT NULL DEFAULT 0
             );
             """
         )
         _ensure_sales_ad_columns(conn)
+        _ensure_sales_channel_conversion_columns(conn)
         row = conn.execute(
             "SELECT COUNT(*) AS c FROM users WHERE username = ?",
             ("admin",),
@@ -71,6 +74,17 @@ def init_db() -> None:
             _seed_sales(conn)
         else:
             _backfill_sales_ad_metrics_if_needed(conn)
+            _backfill_sales_channel_conversions_if_needed(conn)
+
+
+def _ensure_sales_channel_conversion_columns(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
+    if "channel" not in cols:
+        conn.execute("ALTER TABLE sales ADD COLUMN channel TEXT NOT NULL DEFAULT ''")
+    if "conversions" not in cols:
+        conn.execute(
+            "ALTER TABLE sales ADD COLUMN conversions INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _ensure_sales_ad_columns(conn: sqlite3.Connection) -> None:
@@ -108,9 +122,36 @@ def _backfill_sales_ad_metrics_if_needed(conn: sqlite3.Connection) -> None:
         )
 
 
+def _backfill_sales_channel_conversions_if_needed(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN channel != '' THEN 1 ELSE 0 END) AS nz "
+        "FROM sales"
+    ).fetchone()
+    if row is None or row["total"] == 0:
+        return
+    if row["nz"] and row["nz"] > 0:
+        return
+    channels = ("네이버", "카카오", "구글", "메타", "토스")
+    for r in conn.execute(
+        "SELECT id, quantity, clicks FROM sales ORDER BY id"
+    ).fetchall():
+        sid = int(r["id"])
+        qty = int(r["quantity"] or 0)
+        clk = int(r["clicks"] or 0)
+        ch = channels[sid % len(channels)]
+        conv = max(0, int(qty * 0.35 + clk * 0.02))
+        if conv < 1 and (qty + clk) > 0:
+            conv = 1
+        conn.execute(
+            "UPDATE sales SET channel = ?, conversions = ? WHERE id = ?",
+            (ch, conv, sid),
+        )
+
+
 def _seed_sales(conn: sqlite3.Connection) -> None:
     categories = ("전자", "식품", "의류", "가구", "도서")
     regions = ("서울", "경기", "부산", "대구", "광주")
+    channels = ("네이버", "카카오", "구글", "메타", "토스")
     base = date.today() - timedelta(days=120)
     rows = []
     for i in range(400):
@@ -122,15 +163,28 @@ def _seed_sales(conn: sqlite3.Connection) -> None:
         imp = 5000 + (i * 131) % 80000
         clk = max(1, min(imp - 1, imp * ((i * 7) % 12 + 1) // 100))
         spend = float(amount) * 0.12 + (i % 200) * 30.0
+        ch = channels[i % len(channels)]
+        conv = max(1, int(qty * 0.35 + clk * 0.02))
         rows.append(
-            (d.isoformat(), cat, reg, float(amount), qty, imp, clk, spend)
+            (
+                d.isoformat(),
+                cat,
+                reg,
+                float(amount),
+                qty,
+                imp,
+                clk,
+                spend,
+                ch,
+                conv,
+            )
         )
     conn.executemany(
         """
         INSERT INTO sales (
             sale_date, category, region, amount, quantity,
-            impressions, clicks, ad_spend
-        ) VALUES (?,?,?,?,?,?,?,?)
+            impressions, clicks, ad_spend, channel, conversions
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
         """,
         rows,
     )
@@ -182,7 +236,7 @@ def fetch_sales(
 ) -> list[sqlite3.Row]:
     q = (
         "SELECT sale_date, category, region, amount, quantity, "
-        "impressions, clicks, ad_spend FROM sales WHERE 1=1"
+        "impressions, clicks, ad_spend, channel, conversions FROM sales WHERE 1=1"
     )
     params: list[Any] = []
     if date_from:
@@ -200,6 +254,17 @@ def fetch_sales(
     q += " ORDER BY sale_date"
     with get_conn() as conn:
         return list(conn.execute(q, params).fetchall())
+
+
+def fetch_sales_date_range(date_from: str, date_to: str) -> list[sqlite3.Row]:
+    """기간만으로 전체 행 조회(주간 채널 비교 등)."""
+    q = (
+        "SELECT sale_date, category, region, amount, quantity, "
+        "impressions, clicks, ad_spend, channel, conversions FROM sales "
+        "WHERE sale_date >= ? AND sale_date <= ? ORDER BY sale_date"
+    )
+    with get_conn() as conn:
+        return list(conn.execute(q, (date_from, date_to)).fetchall())
 
 
 def distinct_categories() -> list[str]:
