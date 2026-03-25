@@ -97,24 +97,28 @@ def dashboard() -> None:
         k3.metric("평균 CTR", f"{ctr_pct:.2f}%")
         k4.metric("평균 CPC", f"{cpc:,.0f}원")
 
-        daily = df.groupby(df["sale_date"].dt.date, as_index=False).agg(
-            amount=("amount", "sum"),
-            quantity=("quantity", "sum"),
+        daily = (
+            df.assign(일자=df["sale_date"].dt.date)
+            .groupby("일자", as_index=False)
+            .agg(amount=("amount", "sum"), quantity=("quantity", "sum"))
         )
-        daily = daily.rename(columns={"sale_date": "일자"})
 
         st.subheader("일별 매출 추이")
         st.line_chart(daily.set_index("일자")["amount"])
 
         st.subheader("카테고리별 매출")
-        by_cat = df.groupby("category", as_index=False)["amount"].sum().sort_values(
-            "amount", ascending=False
+        by_cat = (
+            df.groupby("category", as_index=False)
+            .agg(amount=("amount", "sum"))
+            .sort_values("amount", ascending=False)
         )
         st.bar_chart(by_cat.set_index("category")["amount"])
 
         st.subheader("지역별 매출")
-        by_reg = df.groupby("region", as_index=False)["amount"].sum().sort_values(
-            "amount", ascending=False
+        by_reg = (
+            df.groupby("region", as_index=False)
+            .agg(amount=("amount", "sum"))
+            .sort_values("amount", ascending=False)
         )
         st.bar_chart(by_reg.set_index("region")["amount"])
 
