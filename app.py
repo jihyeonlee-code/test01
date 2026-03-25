@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 import db
@@ -19,6 +20,49 @@ db.init_db()
 def ensure_session() -> None:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
+
+def _ensure_ad_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    if "channel" not in out.columns:
+        out["channel"] = "기타"
+    else:
+        out["channel"] = out["channel"].replace("", "기타").fillna("기타")
+    if "conversions" not in out.columns:
+        out["conversions"] = 0
+    out["conversions"] = pd.to_numeric(out["conversions"], errors="coerce").fillna(0)
+    out["ad_spend"] = pd.to_numeric(out["ad_spend"], errors="coerce").fillna(0)
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(0)
+    return out
+
+
+def _prev_period(d0: date, d1: date) -> tuple[date, date]:
+    """선택 기간과 동일한 길이의 직전 구간."""
+    n = (d1 - d0).days + 1
+    p1 = d0 - timedelta(days=1)
+    p0 = p1 - timedelta(days=n - 1)
+    return p0, p1
+
+
+def _period_kpis(frame: pd.DataFrame) -> tuple[float, float, float, float]:
+    """(광고비, 매출, ROAS%, CPA). ROAS는 매출÷광고비×100."""
+    if frame is None or frame.empty:
+        return 0.0, 0.0, 0.0, float("nan")
+    spend = float(frame["ad_spend"].sum())
+    rev = float(frame["amount"].sum())
+    conv = float(frame["conversions"].sum())
+    roas_pct = (rev / spend * 100.0) if spend > 0 else 0.0
+    cpa = (spend / conv) if conv > 0 else float("nan")
+    return spend, rev, roas_pct, cpa
+
+
+def _fmt_metric_delta(curr: float, prev: float) -> str | None:
+    if prev == 0:
+        if curr == 0:
+            return None
+        return "신규"
+    p = (curr - prev) / prev * 100.0
+    return f"{p:+.1f}%"
 
 
 def _pct_change(curr: float, prev: float) -> float:
@@ -210,54 +254,200 @@ def dashboard() -> None:
         return
 
     df["sale_date"] = pd.to_datetime(df["sale_date"])
-    total_amt = df["amount"].sum()
-    total_qty = df["quantity"].sum()
-    orders = len(df)
+    df = _ensure_ad_columns(df)
+
+    d0_date = d0 if isinstance(d0, date) else pd.to_datetime(d0).date()
+    d1_date = d1 if isinstance(d1, date) else pd.to_datetime(d1).date()
+    p0, p1 = _prev_period(d0_date, d1_date)
+    rows_prev = db.fetch_sales(
+        p0.isoformat(),
+        p1.isoformat(),
+        cat_filter,
+        reg_filter,
+    )
+    df_prev = _ensure_ad_columns(pd.DataFrame([dict(r) for r in rows_prev]))
+    if not df_prev.empty:
+        df_prev["sale_date"] = pd.to_datetime(df_prev["sale_date"])
+
+    spend_c, rev_c, roas_c, cpa_c = _period_kpis(df)
+    spend_p, rev_p, roas_p, cpa_p = _period_kpis(df_prev)
 
     tab_dash, = st.tabs(["대시보드"])
     with tab_dash:
-        st.title("매출 대시보드")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("총 매출액", f"{total_amt:,.0f}원")
-        c2.metric("총 판매 수량", f"{int(total_qty):,}")
-        c3.metric("건수", f"{orders:,}")
-
-        total_clk = int(df["clicks"].sum())
-        total_imp = int(df["impressions"].sum())
-        ctr_pct = (total_clk / total_imp * 100.0) if total_imp else 0.0
-        total_spend = float(df["ad_spend"].sum())
-        cpc = (total_spend / total_clk) if total_clk else 0.0
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("총 클릭수", f"{total_clk:,}")
-        k2.metric("총 노출수", f"{total_imp:,}")
-        k3.metric("평균 CTR", f"{ctr_pct:.2f}%")
-        k4.metric("평균 CPC", f"{cpc:,.0f}원")
-
-        daily = (
-            df.assign(일자=df["sale_date"].dt.date)
-            .groupby("일자", as_index=False)
-            .agg(amount=("amount", "sum"), quantity=("quantity", "sum"))
+        st.title("대시보드")
+        st.caption(
+            f"선택 기간: {d0_date} ~ {d1_date} · 비교: 직전 동일 길이 기간 "
+            f"({p0} ~ {p1})"
         )
 
-        st.subheader("일별 매출 추이")
-        st.line_chart(daily.set_index("일자")["amount"])
-
-        st.subheader("카테고리별 매출")
-        by_cat = (
-            df.groupby("category", as_index=False)
-            .agg(amount=("amount", "sum"))
-            .sort_values("amount", ascending=False)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            "광고비",
+            f"{spend_c:,.0f}원",
+            delta=_fmt_metric_delta(spend_c, spend_p),
+            delta_color="inverse",
         )
-        st.bar_chart(by_cat.set_index("category")["amount"])
-
-        st.subheader("지역별 매출")
-        by_reg = (
-            df.groupby("region", as_index=False)
-            .agg(amount=("amount", "sum"))
-            .sort_values("amount", ascending=False)
+        m2.metric(
+            "매출",
+            f"{rev_c:,.0f}원",
+            delta=_fmt_metric_delta(rev_c, rev_p),
+            delta_color="normal",
         )
-        st.bar_chart(by_reg.set_index("region")["amount"])
+        m3.metric(
+            "ROAS",
+            f"{roas_c:.1f}%",
+            delta=_fmt_metric_delta(roas_c, roas_p),
+            delta_color="normal",
+        )
+        if np.isnan(cpa_c):
+            m4.metric("CPA", "—", delta=None, delta_color="inverse")
+        else:
+            cpa_delta = None if np.isnan(cpa_p) else _fmt_metric_delta(cpa_c, cpa_p)
+            m4.metric(
+                "CPA",
+                f"{cpa_c:,.0f}원",
+                delta=cpa_delta,
+                delta_color="inverse",
+            )
+
+        st.subheader("추이")
+        trend_metric = st.radio(
+            "지표",
+            ["광고비", "매출", "ROAS", "CPA"],
+            horizontal=True,
+            key="dash_trend_metric",
+        )
+        daily_t = (
+            df.assign(day=df["sale_date"].dt.date)
+            .groupby("day", as_index=False)
+            .agg(
+                ad_spend=("ad_spend", "sum"),
+                revenue=("amount", "sum"),
+                conversions=("conversions", "sum"),
+            )
+        )
+        daily_t["roas_pct"] = np.where(
+            daily_t["ad_spend"] > 0,
+            daily_t["revenue"] / daily_t["ad_spend"] * 100.0,
+            0.0,
+        )
+        daily_t["cpa"] = np.where(
+            daily_t["conversions"] > 0,
+            daily_t["ad_spend"] / daily_t["conversions"],
+            np.nan,
+        )
+
+        fig_t = go.Figure()
+        x_dt = daily_t["day"]
+        if trend_metric == "광고비":
+            fig_t.add_trace(
+                go.Scatter(
+                    x=x_dt,
+                    y=daily_t["ad_spend"],
+                    mode="lines+markers",
+                    name="광고비",
+                    line=dict(color="#636EFA"),
+                )
+            )
+            fig_t.update_layout(yaxis_title="원")
+        elif trend_metric == "매출":
+            fig_t.add_trace(
+                go.Scatter(
+                    x=x_dt,
+                    y=daily_t["revenue"],
+                    mode="lines+markers",
+                    name="매출",
+                    line=dict(color="#00CC96"),
+                )
+            )
+            fig_t.update_layout(yaxis_title="원")
+        elif trend_metric == "ROAS":
+            fig_t.add_trace(
+                go.Scatter(
+                    x=x_dt,
+                    y=daily_t["roas_pct"],
+                    mode="lines+markers",
+                    name="ROAS",
+                    line=dict(color="#AB63FA"),
+                )
+            )
+            fig_t.add_hline(
+                y=200,
+                line_dash="dash",
+                line_color="rgba(128,128,128,0.9)",
+                annotation_text="손익분기 200%",
+                annotation_position="right",
+            )
+            fig_t.update_layout(yaxis_title="ROAS (%)")
+        else:
+            fig_t.add_trace(
+                go.Scatter(
+                    x=x_dt,
+                    y=daily_t["cpa"],
+                    mode="lines+markers",
+                    name="CPA",
+                    line=dict(color="#EF553B"),
+                )
+            )
+            fig_t.update_layout(yaxis_title="원 (전환당)")
+
+        fig_t.update_layout(
+            height=420,
+            margin=dict(l=8, r=8, t=40, b=8),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            xaxis_title="일자",
+        )
+        st.plotly_chart(fig_t, use_container_width=True)
+
+        st.subheader("채널")
+        ch = _agg_by_channel(df)
+        if ch.empty:
+            st.info("채널 데이터가 없습니다.")
+        else:
+            c_left, c_right = st.columns(2)
+            with c_left:
+                fig_p = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=ch["channel"],
+                            values=ch["ad_spend"],
+                            hole=0.52,
+                            textinfo="percent+label",
+                        )
+                    ]
+                )
+                fig_p.update_layout(
+                    title="채널별 광고비 비중",
+                    height=400,
+                    margin=dict(t=50, b=8, l=8, r=8),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_p, use_container_width=True)
+            with c_right:
+                ch_bar = ch.sort_values("roas", ascending=True)
+                roas_pct_bar = ch_bar["roas"].astype(float) * 100.0
+                fig_b = go.Figure(
+                    go.Bar(
+                        x=roas_pct_bar,
+                        y=ch_bar["channel"],
+                        orientation="h",
+                        marker_color="#636EFA",
+                        name="ROAS",
+                    )
+                )
+                fig_b.add_vline(
+                    x=200,
+                    line_dash="dash",
+                    line_color="rgba(128,128,128,0.9)",
+                )
+                fig_b.update_layout(
+                    title="채널별 ROAS (%)",
+                    height=400,
+                    margin=dict(t=50, b=8, l=8, r=8),
+                    xaxis_title="ROAS (%)",
+                    yaxis_title="",
+                )
+                st.plotly_chart(fig_b, use_container_width=True)
 
         st.subheader("주간 성과 비교 (채널별)")
         data_mx = pd.to_datetime(mx).date()
